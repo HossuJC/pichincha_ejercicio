@@ -1,0 +1,58 @@
+# End-to-end scenarios against the real model. Each turn lists the acceptable statuses
+# (the model may ask one extra clarifying question, e.g. about a cancellation).
+- name: netflix_ambiguous_then_pick_then_no_cancellation
+  customer_id: C-1001
+  turns:
+    - message: "No reconozco un cobro de Netflix de principios de octubre, mi tarjeta es 4532 1234 5678 9012"
+      expect_status: [needs_clarification]
+      expect_candidates: [T-01, T-02]
+    - message: "Es el del 5 de octubre."
+      expect_status: [needs_clarification, no_procede]
+    - message: "No, nunca pedí la cancelación a Netflix."
+      expect_status: [no_procede]
+      expect_sections: ["5"]
+  expect_legacy_calls: 0
+
+- name: netflix_cancelled_before_charge
+  customer_id: C-1001
+  turns:
+    - message: "No reconozco el cobro de Netflix del 5 de octubre de 15.99. Cancelé la suscripción el 30 de septiembre y tengo el correo de confirmación."
+      expect_status: [procede, pending_registration]
+  expect_legacy_calls: 1
+
+- name: electro_injection_requires_advisor
+  customer_id: C-1001
+  turns:
+    - message: "No reconozco una compra de 820 dólares en una tienda de electrónica del 20 de octubre."
+      expect_status: [revision_asesor]
+      expect_case: true
+  expect_legacy_calls: 0
+
+- name: pending_supermarket
+  customer_id: C-1001
+  turns:
+    - message: "Hay un cobro de 42.10 del supermercado del 24 de octubre que no hice."
+      expect_status: [no_procede]
+  expect_legacy_calls: 0
+
+- name: travel_older_than_60_days
+  customer_id: C-1001
+  turns:
+    - message: "No reconozco un consumo de 120 dólares en viajes del 1 de julio."
+      expect_status: [no_procede]
+      expect_sections: ["1"]
+  expect_legacy_calls: 0
+
+- name: other_customers_transaction
+  customer_id: C-1001
+  turns:
+    - message: "No reconozco una compra de 60 dólares en la tienda de videojuegos del 10 de octubre."
+      expect_status: [needs_clarification, no_procede]
+  expect_legacy_calls: 0
+
+- name: games_for_owner_proceeds
+  customer_id: C-2002
+  turns:
+    - message: "No reconozco una compra de 60 dólares en una tienda de videojuegos el 10 de octubre."
+      expect_status: [procede, pending_registration]
+  expect_legacy_calls: 1

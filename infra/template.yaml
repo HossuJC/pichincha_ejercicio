@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Asistente de reclamos de tarjeta de crédito (API Gateway + Lambda + DynamoDB + SNS/SQS)
+
+Parameters:
+  AnthropicSecretArn:
+    Type: String
+    Description: ARN del secreto de Secrets Manager con ANTHROPIC_API_KEY
+  Model:
+    Type: String
+    Default: claude-opus-5-5
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 1024
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        APP_MODEL: !Ref Model
+        APP_SESSION_BACKEND: memory  # replace with the DynamoDB adapter (SessionsTable) in production
+        SESSIONS_TABLE: !Ref SessionsTable
+        DISPUTES_TABLE: !Ref DisputesTable
+        ADVISOR_TOPIC_ARN: !Ref AdvisorTopic
+        DISPUTE_QUEUE_URL: !Ref DisputeRegistrationQueue
+        ANTHROPIC_SECRET_ARN: !Ref AnthropicSecretArn
+
+Resources:
+  AssistFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ..
+      Handler: app.lambda_handler.handler
+      Timeout: 29  # API Gateway REST limit; slow legacy calls continue in DisputeWorker
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref SessionsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref DisputesTable}
+        - SNSPublishMessagePolicy: {TopicName: !GetAtt AdvisorTopic.TopicName}
+        - SQSSendMessagePolicy: {QueueName: !GetAtt DisputeRegistrationQueue.QueueName}
+        - AWSSecretsManagerGetSecretValuePolicy: {SecretArn: !Ref AnthropicSecretArn}
+      Events:
+        Assist:
+          Type: Api
+          Properties:
+            Path: /api/v1/disputes/assist
+            Method: post
+
+  # Completes registrations that exceeded the in-request timeout (status pending_registration).
+  DisputeWorker:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ..
+      Handler: app.workers.dispute_worker.handler  # not implemented locally: background thread plays this role
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref DisputesTable}
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DisputeRegistrationQueue.Arn
+            BatchSize: 1
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: session_id, AttributeType: S}]
+      KeySchema: [{AttributeName: session_id, KeyType: HASH}]
+      TimeToLiveSpecification: {AttributeName: expires_at, Enabled: true}
+      SSESpecification: {SSEEnabled: true}
+
+  # Idempotency ledger: conditional put on transaction_id prevents duplicate disputes.
+  DisputesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: transaction_id, AttributeType: S}
+        - {AttributeName: customer_id, AttributeType: S}
+        - {AttributeName: created_on, AttributeType: S}
+      KeySchema: [{AttributeName: transaction_id, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: by_customer
+          KeySchema:
+            - {AttributeName: customer_id, KeyType: HASH}
+            - {AttributeName: created_on, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+      SSESpecification: {SSEEnabled: true}
+
+  DisputeRegistrationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DisputeRegistrationDLQ.Arn
+        maxReceiveCount: 3
+
+  DisputeRegistrationDLQ:
+    Type: AWS::SQS::Queue
+
+  AdvisorTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: dispute-advisor-cases.fifo
+      FifoTopic: true
+
+  # The reglamento lives in a versioned bucket; Legal uploads new versions without a deploy.
+  ReglamentoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration: {Status: Enabled}
+
+Outputs:
+  AssistUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api/v1/disputes/assist"
